@@ -1134,7 +1134,11 @@ do
                     return o
                 end
                 local p, q = pcall(function()
-                    return game:GetService("CoreGui")
+                    local cg = game:GetService("CoreGui")
+                    local t = Instance.new("Folder")
+                    t.Parent = cg
+                    t:Destroy()
+                    return cg
                 end)
                 if p and q then
                     return q
@@ -8664,9 +8668,14 @@ do
                         end,
                     })
                 end
-                p.Parent = ag.GuiParent()
+                local parentOk = pcall(function()
+                    p.Parent = ag.GuiParent()
+                end)
+                if not parentOk or not p.Parent then
+                    p.Parent = ab.LocalPlayer:WaitForChild("PlayerGui")
+                end
                 local aH = Vector2.new(1920, 1080)
-                if workspace.CurrentCamera then
+                if workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.X > 50 then
                     aH = workspace.CurrentCamera.ViewportSize
                 end
                 q.Position = UDim2.fromOffset(math.floor(aH.X / 2), math.floor(aH.Y / 2))
@@ -9631,7 +9640,7 @@ do
                 end
             end
             function d:SetVisible(aH)
-                if self._destroyed or self._visible == aH then
+                if self._destroyed or (self._visible == aH and self._holder and self._holder.Visible == aH) then
                     return
                 end
                 if not aH then
@@ -9639,7 +9648,9 @@ do
                     self._tooltip.Visible = false
                 end
                 self._visible = aH
-                self._holder.Visible = aH
+                if self._holder then
+                    self._holder.Visible = aH
+                end
                 if aH then
                     self._scale.Scale = 0.96 * self._fit
                     ae.Tween(self._scale, {
@@ -10614,10 +10625,25 @@ task.spawn(function()
     end
 end)
 
-local ClientState = require(LocalPlayer.PlayerScripts:WaitForChild("ClientState"))
-local Balance = require(ReplicatedStorage:WaitForChild("Balance"))
+local ClientState = nil
+pcall(function()
+    ClientState = require(LocalPlayer.PlayerScripts:WaitForChild("ClientState", 5))
+end)
 
-local LaunchStrip = workspace:WaitForChild("Map"):WaitForChild("Canyon"):WaitForChild("LaunchStrip")
+local Balance = nil
+pcall(function()
+    Balance = require(ReplicatedStorage:WaitForChild("Balance", 5))
+end)
+
+local function getLaunchStrip()
+    local ok, res = pcall(function()
+        return workspace.Map.Canyon.LaunchStrip
+    end)
+    if ok and res then return res end
+    local map = workspace:FindFirstChild("Map")
+    local canyon = map and map:FindFirstChild("Canyon")
+    return canyon and canyon:FindFirstChild("LaunchStrip")
+end
 
 -- -------------------------------------------------------------------------
 -- EXECUTOR & ENVIRONMENT COMPATIBILITY LAYER (UNC / UNIVERSAL)
@@ -10652,9 +10678,12 @@ local function getSafeGuiParent()
     local ok, res = pcall(function()
         if gethui then
             return gethui()
-        elseif game:GetService("CoreGui") then
-            return game:GetService("CoreGui")
         end
+        local cg = game:GetService("CoreGui")
+        local test = Instance.new("Folder")
+        test.Parent = cg
+        test:Destroy()
+        return cg
     end)
     if ok and res then return res end
     return LocalPlayer:WaitForChild("PlayerGui")
@@ -10773,11 +10802,14 @@ end
 
 -- Remove old UI instances cleanly
 pcall(function()
-    local targetGui = getSafeGuiParent()
-    if targetGui then
-        for _, c in ipairs(targetGui:GetChildren()) do
-            if c.Name == "shadcn" or c.Name == "StreetHubMobileBtn" then
-                c:Destroy()
+    local containers = { getSafeGuiParent(), LocalPlayer:FindFirstChild("PlayerGui") }
+    pcall(function() table.insert(containers, game:GetService("CoreGui")) end)
+    for _, targetGui in ipairs(containers) do
+        if targetGui then
+            for _, c in ipairs(targetGui:GetChildren()) do
+                if c.Name == "shadcn" or c.Name == "StreetHubMobileBtn" then
+                    pcall(c.Destroy, c)
+                end
             end
         end
     end
@@ -10833,8 +10865,9 @@ task.spawn(function()
         local state = ThrowFX and ThrowFX:GetAttribute("State")
 
         if state == "idle" or state == "home" or not state then
-            if root then
-                root.CFrame = LaunchStrip.CFrame * CFrame.new(0, 3, 0)
+            local strip = getLaunchStrip()
+            if root and strip then
+                root.CFrame = strip.CFrame * CFrame.new(0, 3, 0)
             end
             task.wait(0.4)
             continue
@@ -11403,8 +11436,9 @@ BtnTpLaunch = SecTeleport:AddButton({
     Description = "วาร์ปตรงไปยังแท่นปล่อยเมล็ดพันธุ์ใน Canyon",
     Callback = function()
         local root = getRootPart()
-        if root then
-            root.CFrame = LaunchStrip.CFrame * CFrame.new(0, 3, 0)
+        local strip = getLaunchStrip()
+        if root and strip then
+            root.CFrame = strip.CFrame * CFrame.new(0, 3, 0)
         end
     end
 })
@@ -11445,7 +11479,13 @@ BtnTpBar = SecTeleport:AddButton({
 TabTheme:AddThemeSettings()
 
 -- Make window visible immediately
-Window:SetVisible(true)
+pcall(function()
+    Window._visible = false
+    Window:SetVisible(true)
+    if Window._holder then
+        Window._holder.Visible = true
+    end
+end)
 
 -- Initial language apply
 applyLanguage(Config.Language or "th", false)
