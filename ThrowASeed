@@ -10748,6 +10748,35 @@ local function safeClick(btn)
 end
 
 -- -------------------------------------------------------------------------
+-- NUMBER PARSING & FORMATTING UTILITIES (Auto Sell & Economics)
+-- -------------------------------------------------------------------------
+local function parseFormattedNumber(str)
+    if type(str) == "number" then return str end
+    if type(str) ~= "string" then return 0 end
+    local clean = str:gsub(",", ""):gsub("%$", ""):gsub("%s+", ""):upper()
+    local num, suffix = clean:match("^([%d%.]+)([A-Z]*)$")
+    if not num then return tonumber(clean) or 0 end
+    local val = tonumber(num) or 0
+    local multipliers = {
+        K = 1e3,
+        M = 1e6,
+        B = 1e9,
+        T = 1e12,
+        QA = 1e15,
+        QI = 1e18,
+        SX = 1e21,
+        SP = 1e24,
+        OC = 1e27,
+        NO = 1e30,
+        DC = 1e33
+    }
+    if suffix and multipliers[suffix] then
+        return val * multipliers[suffix]
+    end
+    return val
+end
+
+-- -------------------------------------------------------------------------
 -- CONFIGURATION & ACCOUNT PERSISTENCE
 -- -------------------------------------------------------------------------
 local Config = {
@@ -10759,7 +10788,11 @@ local Config = {
     AutoBuyCapacity = false,
     AutoBuyBar = false,
     AutoBuySeed = false,
-    AutoClaimRewards = false
+    AutoClaimRewards = false,
+    AutoSell = false,
+    AutoSellThreshold = 1000000,
+    AutoSellThresholdText = "1M",
+    AutoSellMode = "Income" -- "Income" ($/s) or "Price" (Sell Price)
 }
 
 local CONFIG_FILE = string.format("StreetHub_ThrowASeed_%s.json", tostring(LocalPlayer.UserId))
@@ -10783,6 +10816,9 @@ local function loadConfig()
                 if type(data) == "table" then
                     for k, v in pairs(data) do
                         Config[k] = v
+                    end
+                    if Config.AutoSellThresholdText then
+                        Config.AutoSellThreshold = parseFormattedNumber(Config.AutoSellThresholdText)
                     end
                     hasSaved = true
                 end
@@ -11032,6 +11068,108 @@ task.spawn(function()
 end)
 
 -- -------------------------------------------------------------------------
+-- 5. AUTO SELL BY MONEY SYSTEM
+-- -------------------------------------------------------------------------
+local function sellPlantsBelowThreshold(notify)
+    local soldCount = 0
+    pcall(function()
+        if not ClientState or not ClientState.plants then return end
+        local threshold = Config.AutoSellThreshold or parseFormattedNumber(Config.AutoSellThresholdText) or 0
+        if threshold <= 0 then return end
+
+        local multiplier = (Balance and Balance.SellMultiplier) or 10
+        local toSell = {}
+        for _, p in ipairs(ClientState.plants) do
+            if not p.placed and p.id then
+                local targetValue = p.income or 0
+                if Config.AutoSellMode == "Price" then
+                    targetValue = math.floor(targetValue * multiplier)
+                end
+                if targetValue <= threshold then
+                    table.insert(toSell, p)
+                end
+            end
+        end
+
+        for _, p in ipairs(toSell) do
+            local ok = pcall(function()
+                ClientState.Request("Sell", { id = p.id })
+            end)
+            if ok then
+                soldCount = soldCount + 1
+            end
+            task.wait(0.08)
+        end
+    end)
+
+    if notify and UI and UI.Toast then
+        local t = I18N and (I18N[Config.Language] or I18N.th)
+        if t then
+            if soldCount > 0 then
+                UI:Toast({
+                    Title = t.ToastSellSuccess or "Auto Sell",
+                    Type = "Success",
+                    Description = string.format(t.ToastSellSuccessDesc or "Sold %d stored plants", soldCount),
+                    Duration = 2.5
+                })
+            else
+                UI:Toast({
+                    Title = t.ToastSellSuccess or "Auto Sell",
+                    Type = "Info",
+                    Description = t.ToastSellNoneDesc or "No plants below threshold",
+                    Duration = 2
+                })
+            end
+        end
+    end
+    return soldCount
+end
+
+task.spawn(function()
+    while _G.SpinachRunning do
+        task.wait(1.5)
+        if not Config.AutoSell then continue end
+
+        pcall(function()
+            if not ClientState or not ClientState.plants then return end
+
+            -- Keep highest earners safe on plot if AutoPlaceBest is on
+            if Config.AutoPlaceBest then
+                pcall(function()
+                    ClientState.Request("PlaceBest")
+                end)
+                task.wait(0.2)
+            end
+
+            local threshold = Config.AutoSellThreshold or parseFormattedNumber(Config.AutoSellThresholdText) or 0
+            if threshold <= 0 then return end
+
+            local multiplier = (Balance and Balance.SellMultiplier) or 10
+            local toSell = {}
+            for _, p in ipairs(ClientState.plants) do
+                if not p.placed and p.id then
+                    local targetValue = p.income or 0
+                    if Config.AutoSellMode == "Price" then
+                        targetValue = math.floor(targetValue * multiplier)
+                    end
+                    if targetValue <= threshold then
+                        table.insert(toSell, p)
+                    end
+                end
+            end
+
+            for _, p in ipairs(toSell) do
+                if not _G.SpinachRunning or not Config.AutoSell then break end
+                pcall(function()
+                    ClientState.Request("Sell", { id = p.id })
+                end)
+                task.wait(0.08)
+            end
+        end)
+    end
+end)
+
+-- -------------------------------------------------------------------------
 -- I18N DICTIONARY (ไทย / ENGLISH)
 -- -------------------------------------------------------------------------
 local I18N = {
@@ -11062,6 +11200,23 @@ local I18N = {
         Toggle2xDesc = "ดักจับและกดเคลมฟองม่วง 2x XP อัตโนมัติทันทีที่ปรากฏ (0ms)",
         TogglePlaceBest = "Auto Place Best Plants (วางต้นไม้ดีสุด)",
         TogglePlaceBestDesc = "จัดวางต้นไม้ที่ให้เงินสูงสุดลงแปลงสวนอัตโนมัติ",
+        
+        -- Auto Sell Section
+        SecSell = "ระบบขายต้นไม้อัตโนมัติ (Auto Sell System)",
+        SecSellDesc = "ขายต้นไม้ในกระเป๋าที่มีเงินหรือรายได้น้อยกว่าเกณฑ์ที่กำหนด",
+        ToggleAutoSell = "Auto Sell (ขายต้นไม้อัตโนมัติตามจำนวนเงิน)",
+        ToggleAutoSellDesc = "ขายต้นไม้ในกระเป๋าที่มีเงินน้อยกว่าเกณฑ์ที่กำหนดอย่างต่อเนื่อง",
+        InputAutoSell = "เกณฑ์จำนวนเงิน (Money Threshold)",
+        InputAutoSellDesc = "ระบุจำนวนเงิน เช่น 500K, 10M, 1B, 100B (ขายตัวที่น้อยกว่าหรือเท่ากับค่านี้)",
+        DropdownSellMode = "โหมดคิดจำนวนเงิน (Sell Mode)",
+        DropdownSellModeDesc = "เลือกรูปแบบจำนวนเงินที่ใช้เปรียบเทียบ",
+        BtnSellBelow = "ขายต้นไม้ต่ำกว่าเกณฑ์ทันที",
+        BtnSellBelowDesc = "สั่งขายต้นไม้ในกระเป๋าที่เข้าเกณฑ์เงินต่ำกว่าที่ตั้งไว้ทันที 1 ครั้ง",
+        BtnSellStored = "ขายต้นไม้ในกระเป๋าทั้งหมด",
+        BtnSellStoredDesc = "ขายต้นไม้ที่ไม่ได้วางในแปลงทั้งหมดทันที (SellStored)",
+        ToastSellSuccess = "ขายต้นไม้สำเร็จ",
+        ToastSellSuccessDesc = "ขายต้นไม้ไปแล้ว %d ต้น (ได้รับเงินเพิ่ม)",
+        ToastSellNoneDesc = "ไม่พบต้นไม้ในกระเป๋าที่ต่ำกว่าเกณฑ์",
         
         -- Upgrades Section
         SecUpgrades = "ระบบอัปเกรดอัตโนมัติ (Automatic Upgrades)",
@@ -11118,6 +11273,23 @@ local I18N = {
         Toggle2xDesc = "Instantly intercept and claim 2x XP purple bubbles on spawn (0ms)",
         TogglePlaceBest = "Auto Place Best Plants",
         TogglePlaceBestDesc = "Automatically place highest income-generating plants in garden",
+        
+        -- Auto Sell Section
+        SecSell = "Auto Sell System (Money Amount)",
+        SecSellDesc = "Automated plant selling based on money/income threshold",
+        ToggleAutoSell = "Auto Sell Plants (By Money Amount)",
+        ToggleAutoSellDesc = "Continuously sell stored plants earning less than the threshold",
+        InputAutoSell = "Money Threshold",
+        InputAutoSellDesc = "Enter amount e.g. 500K, 10M, 1B, 100B (sells plants <= this)",
+        DropdownSellMode = "Sell Filter Mode",
+        DropdownSellModeDesc = "Choose whether to compare by $/s or Net Sell Price",
+        BtnSellBelow = "Sell Below Threshold Now",
+        BtnSellBelowDesc = "Immediately sell all inventory plants below the set amount",
+        BtnSellStored = "Sell All Stored Plants",
+        BtnSellStoredDesc = "Instantly sell all plants currently in inventory (SellStored)",
+        ToastSellSuccess = "Sold Plants",
+        ToastSellSuccessDesc = "Sold %d stored plants successfully!",
+        ToastSellNoneDesc = "No stored plants found below the threshold",
         
         -- Upgrades Section
         SecUpgrades = "Automatic Upgrades",
@@ -11214,6 +11386,7 @@ end
 -- Forward declarations of components
 local SecLang, DropdownLang
 local SecFarming, ToggleThrow, ToggleTrain, Toggle2x, TogglePlaceBest
+local SecSell, ToggleAutoSell, InputAutoSell, DropdownSellMode, BtnSellBelow, BtnSellStored
 local SecUpgrades, ToggleBuyCapacity, ToggleBuyBar, ToggleBuySeed, ToggleClaimRewards
 local SecTeleport, BtnTpLaunch, BtnTpPlot, BtnTpBar
 
@@ -11223,6 +11396,7 @@ local function applyLanguage(lang, showToast)
 
     updateSection(SecLang, t.SecLang, t.SecLangDesc)
     updateSection(SecFarming, t.SecFarming, t.SecFarmingDesc)
+    updateSection(SecSell, t.SecSell, t.SecSellDesc)
     updateSection(SecUpgrades, t.SecUpgrades, t.SecUpgradesDesc)
     updateSection(SecTeleport, t.SecTeleport, t.SecTeleportDesc)
 
@@ -11246,6 +11420,33 @@ local function applyLanguage(lang, showToast)
     if TogglePlaceBest then
         TogglePlaceBest:SetTitle(t.TogglePlaceBest)
         TogglePlaceBest:SetDescription(t.TogglePlaceBestDesc)
+    end
+
+    if ToggleAutoSell then
+        ToggleAutoSell:SetTitle(t.ToggleAutoSell)
+        ToggleAutoSell:SetDescription(t.ToggleAutoSellDesc)
+    end
+    if InputAutoSell then
+        InputAutoSell:SetTitle(t.InputAutoSell)
+        InputAutoSell:SetDescription(t.InputAutoSellDesc)
+    end
+    if DropdownSellMode then
+        DropdownSellMode:SetTitle(t.DropdownSellMode)
+        DropdownSellMode:SetDescription(t.DropdownSellModeDesc)
+        if DropdownSellMode.SetOptions then
+            local opts = (lang == "en" and { "Income Rate ($/s)", "Net Sell Price" } or { "รายได้ต่อวิ (Income $/s)", "ราคาขายเหรียญ (Sell Price)" })
+            DropdownSellMode:SetOptions(opts)
+            local def = Config.AutoSellMode == "Price" and opts[2] or opts[1]
+            DropdownSellMode:Set(def, true)
+        end
+    end
+    if BtnSellBelow then
+        BtnSellBelow:SetTitle(t.BtnSellBelow)
+        BtnSellBelow:SetDescription(t.BtnSellBelowDesc)
+    end
+    if BtnSellStored then
+        BtnSellStored:SetTitle(t.BtnSellStored)
+        BtnSellStored:SetDescription(t.BtnSellStoredDesc)
     end
 
     if ToggleBuyCapacity then
@@ -11368,6 +11569,88 @@ TogglePlaceBest = SecFarming:AddToggle({
     Callback = function(v)
         Config.AutoPlaceBest = v
         saveConfig()
+    end
+})
+
+-- =========================================================================
+-- SECTION: AUTO SELL BY MONEY SYSTEM
+-- =========================================================================
+SecSell = TabFarm:AddSection({
+    Title = (Config.Language == "en" and "Auto Sell System (Money Amount)" or "ระบบขายต้นไม้อัตโนมัติ (Auto Sell System)"),
+    Description = (Config.Language == "en" and "Automated plant selling based on money/income threshold" or "ขายต้นไม้ในกระเป๋าที่มีเงินหรือรายได้น้อยกว่าเกณฑ์ที่กำหนด"),
+    Icon = "dollar-sign",
+    Color = "Emerald"
+})
+
+ToggleAutoSell = SecSell:AddToggle({
+    Title = (Config.Language == "en" and "Auto Sell Plants (By Money Amount)" or "Auto Sell (ขายต้นไม้อัตโนมัติตามจำนวนเงิน)"),
+    Description = (Config.Language == "en" and "Continuously sell stored plants earning less than the threshold" or "ขายต้นไม้ในกระเป๋าที่มีเงินน้อยกว่าเกณฑ์ที่กำหนดอย่างต่อเนื่อง"),
+    Default = Config.AutoSell,
+    Callback = function(v)
+        Config.AutoSell = v
+        saveConfig()
+    end
+})
+
+InputAutoSell = SecSell:AddInput({
+    Title = (Config.Language == "en" and "Money Threshold" or "เกณฑ์จำนวนเงิน (Money Threshold)"),
+    Description = (Config.Language == "en" and "Enter amount e.g. 500K, 10M, 1B, 100B (sells plants <= this)" or "ระบุจำนวนเงิน เช่น 500K, 10M, 1B, 100B (ขายตัวที่น้อยกว่าหรือเท่ากับค่านี้)"),
+    Placeholder = "เช่น 1M, 50M, 1B...",
+    Default = Config.AutoSellThresholdText or "1M",
+    Width = 160,
+    Callback = function(val)
+        if val and tostring(val) ~= "" then
+            Config.AutoSellThresholdText = tostring(val)
+            Config.AutoSellThreshold = parseFormattedNumber(val)
+            saveConfig()
+        end
+    end
+})
+
+local modeOptions = {
+    th = { "รายได้ต่อวิ (Income $/s)", "ราคาขายเหรียญ (Sell Price)" },
+    en = { "Income Rate ($/s)", "Net Sell Price" }
+}
+
+DropdownSellMode = SecSell:AddDropdown({
+    Title = (Config.Language == "en" and "Sell Filter Mode" or "โหมดคิดจำนวนเงิน (Sell Mode)"),
+    Description = (Config.Language == "en" and "Choose whether to compare by $/s or Net Sell Price" or "เลือกรูปแบบจำนวนเงินที่ใช้เปรียบเทียบ"),
+    Options = (Config.Language == "en" and modeOptions.en or modeOptions.th),
+    Values = (Config.Language == "en" and modeOptions.en or modeOptions.th),
+    Default = (Config.AutoSellMode == "Price" and (Config.Language == "en" and "Net Sell Price" or "ราคาขายเหรียญ (Sell Price)") or (Config.Language == "en" and "Income Rate ($/s)" or "รายได้ต่อวิ (Income $/s)")),
+    Callback = function(v)
+        if tostring(v):find("Price") or tostring(v):find("ราคาขาย") then
+            Config.AutoSellMode = "Price"
+        else
+            Config.AutoSellMode = "Income"
+        end
+        saveConfig()
+    end
+})
+
+BtnSellBelow = SecSell:AddButton({
+    Title = (Config.Language == "en" and "Sell Below Threshold Now" or "ขายต้นไม้ต่ำกว่าเกณฑ์ทันที"),
+    Description = (Config.Language == "en" and "Immediately sell all inventory plants below the set amount" or "สั่งขายต้นไม้ในกระเป๋าที่เข้าเกณฑ์เงินต่ำกว่าที่ตั้งไว้ทันที 1 ครั้ง"),
+    Callback = function()
+        sellPlantsBelowThreshold(true)
+    end
+})
+
+BtnSellStored = SecSell:AddButton({
+    Title = (Config.Language == "en" and "Sell All Stored Plants" or "ขายต้นไม้ในกระเป๋าทั้งหมด"),
+    Description = (Config.Language == "en" and "Instantly sell all plants currently in inventory (SellStored)" or "ขายต้นไม้ที่ไม่ได้วางในแปลงทั้งหมดทันที (SellStored)"),
+    Callback = function()
+        pcall(function()
+            local ok, msg = ClientState.Request("SellStored")
+            if UI and UI.Toast then
+                UI:Toast({
+                    Title = ok and "Sell Stored" or "Warning",
+                    Type = ok and "Success" or "Warning",
+                    Description = tostring(msg or "Executed SellStored"),
+                    Duration = 2
+                })
+            end
+        end)
     end
 })
 
