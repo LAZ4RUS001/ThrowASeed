@@ -10569,6 +10569,51 @@ local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 
+-- -------------------------------------------------------------------------
+-- BACKGROUND ANTI-AFK SYSTEM (SILENT / NO REJOIN)
+-- -------------------------------------------------------------------------
+task.spawn(function()
+    pcall(function()
+        if getconnections then
+            for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+                if conn.Disable then
+                    conn:Disable()
+                elseif conn.Disconnect then
+                    conn:Disconnect()
+                end
+            end
+        end
+    end)
+
+    local VirtualUser = game:GetService("VirtualUser")
+    local VirtualInputManager = nil
+    pcall(function()
+        VirtualInputManager = game:GetService("VirtualInputManager")
+    end)
+
+    LocalPlayer.Idled:Connect(function()
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+        if VirtualInputManager then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightControl, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightControl, false, game)
+            end)
+        end
+    end)
+
+    while true do
+        task.wait(300)
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+    end
+end)
+
 local ClientState = require(LocalPlayer.PlayerScripts:WaitForChild("ClientState"))
 local Balance = require(ReplicatedStorage:WaitForChild("Balance"))
 
